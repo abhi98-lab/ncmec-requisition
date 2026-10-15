@@ -1,0 +1,6 @@
+{
+  "name": "NCMEC Requisition",
+  "description": "Internal document-generation utility for 179 BNSS notices and CAF/CDR/SDR requisitions from NCMEC registers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
