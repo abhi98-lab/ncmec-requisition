@@ -21,9 +21,16 @@ export function cleanPoliceStationName(rawPs: string): string {
   ps = ps.replace(/^(?:Through|THROUGH)\s*:?\s*/i, '');
   ps = ps.replace(/^(?:O\.?C\.?|Officer[- ]in[- ]charge|Inspector[- ]in[- ]charge|I\.?C\.?)[,\s]*/i, '');
   ps = ps.replace(/^Birbhum\s+Cyber\s+Crime\s+PS\s*/i, '');
+  ps = ps.replace(/^Birbhum\s+Cyber\s+Crime\s*/i, '');
   // Remove trailing police station suffixes
   ps = ps.replace(/\s*(?:Police\s*Station|P\.?S\.?)\s*$/i, '');
   ps = ps.replace(/^[,.\s-]+|[,.\s-]+$/g, '').trim();
+  // Remove consecutive duplicated words (e.g. "Murarai Murarai" -> "Murarai", "Bolpur Bolpur" -> "Bolpur")
+  ps = ps.replace(/\b([A-Za-z]+)\s+\1\b/gi, '$1').trim();
+  // The Through authority must NOT use Birbhum Cyber Crime PS
+  if (/^Birbhum\s+Cyber\s+Crime$/i.test(ps) || /^Cyber\s+Crime$/i.test(ps)) {
+    return '';
+  }
   return ps;
 }
 
@@ -54,16 +61,16 @@ export function formatThroughLine(rawPs: string): string {
 function getPlaceholderPatterns(key: string): RegExp[] {
   const escaped = escapeRegExp(key);
   const patterns: RegExp[] = [
-    new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, 'g'),
-    new RegExp(`<<\\s*${escaped}\\s*>>`, 'g'),
-    new RegExp(`«\\s*${escaped}\\s*»`, 'g'),
-    new RegExp(`\\{${escaped}\\}`, 'g'),
-    new RegExp(`\\[${escaped}\\]`, 'g'),
-    new RegExp(`<${escaped}>`, 'g'),
+    new RegExp(`\\{\\{\\s*${escaped}\\s*\\}\\}`, 'gi'),
+    new RegExp(`<<\\s*${escaped}\\s*>>`, 'gi'),
+    new RegExp(`«\\s*${escaped}\\s*»`, 'gi'),
+    new RegExp(`\\{${escaped}\\}`, 'gi'),
+    new RegExp(`\\[${escaped}\\]`, 'gi'),
+    new RegExp(`<${escaped}>`, 'gi'),
   ];
 
   if (key.includes('_')) {
-    patterns.push(new RegExp(`\\b${escaped}\\b`, 'g'));
+    patterns.push(new RegExp(`\\b${escaped}\\b`, 'gi'));
   }
 
   return patterns;
@@ -80,9 +87,10 @@ export function setRunText(tNode: Element, text: string): void {
   tNode.textContent = text;
   if (text && /[\s\u00A0]/.test(text)) {
     try {
+      tNode.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
       tNode.setAttribute('xml:space', 'preserve');
     } catch {
-      // Fallback
+      tNode.setAttribute('xml:space', 'preserve');
     }
   } else if (!text) {
     tNode.removeAttribute('xml:space');
@@ -168,7 +176,10 @@ function replaceAcrossParagraphRuns(
 
   let hasModified = false;
 
-  for (const [key, rawValue] of Object.entries(replacements)) {
+  // Sort keys by length descending so longer placeholders are processed first
+  const sortedEntries = Object.entries(replacements).sort((a, b) => b[0].length - a[0].length);
+
+  for (const [key, rawValue] of sortedEntries) {
     const value = rawValue ?? '';
     const patterns = getPlaceholderPatterns(key);
 
@@ -241,6 +252,17 @@ function replaceAcrossParagraphRuns(
     }
   }
 
+  // If this paragraph was modified, ensure any run with leading or trailing whitespace
+  // has xml:space="preserve" set so Word never strips spaces between adjacent runs.
+  if (hasModified) {
+    const finalNodes = Array.from(p.getElementsByTagName('w:t'));
+    for (const t of finalNodes) {
+      if (/^\s|\s$/.test(t.textContent || '')) {
+        setRunText(t, t.textContent || '');
+      }
+    }
+  }
+
   return hasModified;
 }
 
@@ -256,42 +278,173 @@ function processDocumentXml(xmlDoc: Document, replacements: Record<string, strin
 }
 
 /**
- * Dedicated handler for the Through transmission line in 179 Notice.
+ * Dedicated non-destructive handler for the Through transmission line in 179 Notice.
  * Ensures the Through line always uses:
  * "Through O.C., [RECORD_PS] PS"
  *
- * Preserves paragraph alignment, font, font size, bold, indentation, and margins.
+ * Replaces ONLY the authority text in the Through paragraph without destroying
+ * runs, run properties (font, bold, color, size), indentation, margins, or whitespace.
  */
 function applyThroughLine(xmlDoc: Document, recordPs: string): void {
-  const targetThroughLine = formatThroughLine(recordPs);
+  const cleanPs = cleanPoliceStationName(recordPs) || 'concerned';
+  const targetAuthority = `O.C., ${cleanPs} PS`;
   const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
 
   for (const p of paragraphs) {
     const textNodes = Array.from(p.getElementsByTagName('w:t'));
-    const fullText = textNodes.map(t => t.textContent || '').join('').trim();
+    const fullText = textNodes.map(t => t.textContent || '').join('');
 
-    // Check if this paragraph is the Through line (e.g. "Through ...")
-    if (/^Through\b/i.test(fullText)) {
-      const runs = Array.from(p.getElementsByTagName('w:r'));
-      if (runs.length > 0) {
-        const firstRun = runs[0];
-        // Remove all other runs in this paragraph
-        for (let i = 1; i < runs.length; i++) {
-          p.removeChild(runs[i]);
+    // Check if this paragraph is a Through line (e.g. "Through ...")
+    if (/^\s*Through\b/i.test(fullText)) {
+      // If the paragraph already has a template placeholder (e.g. {{THROUGH}}, {{RECORD_PS}}),
+      // let the placeholder engine replace it precisely.
+      if (/\{\{|\{\s*THROUGH|<<|«|\[THROUGH|\[RECORD_PS/i.test(fullText)) {
+        return;
+      }
+
+      // The paragraph has static text like "Through O.C., Bolpur PS" or "Through Birbhum Cyber Crime PS"
+      // or "Through: Bolpur" or "Through".
+      // Replace the portion after "Through" (and optional punctuation/spaces) with targetAuthority.
+      const match = fullText.match(/^(\s*Through\s*[:,-]?\s*)(.*)$/i);
+      if (match) {
+        const prefix = match[1];
+        const oldAuthority = match[2];
+
+        if (oldAuthority.trim() === targetAuthority.trim()) {
+          // Already exact match, nothing to change
+          return;
         }
-        // Remove existing children of firstRun except w:rPr (preserving font, size, style)
-        const rChildren = Array.from(firstRun.childNodes);
-        for (const child of rChildren) {
-          if (child.nodeName !== 'w:rPr') {
-            firstRun.removeChild(child);
+
+        // Precision replace across the runs:
+        // Find runs occupied by oldAuthority and replace with targetAuthority
+        const matchStart = prefix.length;
+        const matchEnd = fullText.length;
+
+        let currentPos = 0;
+        const ranges: { node: Element; start: number; end: number }[] = [];
+        for (const tNode of textNodes) {
+          const txt = tNode.textContent || '';
+          ranges.push({ node: tNode, start: currentPos, end: currentPos + txt.length });
+          currentPos += txt.length;
+        }
+
+        let startNodeIdx = -1;
+        let endNodeIdx = -1;
+        for (let i = 0; i < ranges.length; i++) {
+          if (startNodeIdx === -1 && matchStart >= ranges[i].start && matchStart <= ranges[i].end) {
+            startNodeIdx = i;
+          }
+          if (matchEnd >= ranges[i].start && matchEnd <= ranges[i].end) {
+            endNodeIdx = i;
+            break;
           }
         }
-        // Add new w:t node with preserved space
-        const t = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
-        setRunText(t, targetThroughLine);
-        firstRun.appendChild(t);
+
+        if (startNodeIdx !== -1) {
+          if (endNodeIdx === -1) endNodeIdx = ranges.length - 1;
+
+          const startRange = ranges[startNodeIdx];
+          const textBefore = (startRange.node.textContent || '').substring(0, matchStart - startRange.start);
+
+          // Update start node with textBefore + targetAuthority
+          setRunText(startRange.node, textBefore + targetAuthority);
+
+          // Clear any subsequent runs in this paragraph that belonged to the old authority
+          for (let j = startNodeIdx + 1; j <= endNodeIdx; j++) {
+            setRunText(ranges[j].node, '');
+          }
+        }
       }
       return;
+    }
+  }
+}
+
+/**
+ * Ensures Memo Number is formatted without duplicating suffix.
+ * Handles cases where master DOCX has:
+ * - Placeholders: {{MEMO_NO}} / <<MEMO_NO>> / [MEMO_NO]
+ * - Static previous memo: No. 150/2026-Cyber-BHM
+ * - Deduplicates any accidental repeated suffix like /2026-Cyber-BHM/2026-Cyber-BHM
+ */
+function applyMemoNumber(xmlDoc: Document, numericMemo: string): void {
+  const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
+
+  for (const p of paragraphs) {
+    const textNodes = Array.from(p.getElementsByTagName('w:t'));
+    const fullText = textNodes.map(t => t.textContent || '').join('');
+
+    // Check if this paragraph contains a memo line
+    if (/(?:No\.?|Memo\s*No\.?)\s*(?:\d+|\.{2,}|_{2,}|\s*)\s*\/\s*\d{4}-Cyber/i.test(fullText)) {
+      // If it contains a placeholder, let placeholder replacement handle it first
+      if (/\{\{|\{\s*MEMO|<<|«|\[MEMO/i.test(fullText)) {
+        continue;
+      }
+
+      // Static memo line like "No. 150/2026-Cyber-BHM"
+      // Replace the number before the slash with numericMemo
+      const memoRegex = /(No\.?\s*)(\d+|\.{2,}|_{2,})(\s*\/\s*\d{4}-Cyber-[A-Za-z]+)/i;
+      const match = fullText.match(memoRegex);
+      if (match) {
+        const targetText = match[1] + numericMemo + match[3];
+        // Replace in runs
+        const matchStart = match.index!;
+        const matchEnd = matchStart + match[0].length;
+
+        let currentPos = 0;
+        const ranges: { node: Element; start: number; end: number }[] = [];
+        for (const tNode of textNodes) {
+          const txt = tNode.textContent || '';
+          ranges.push({ node: tNode, start: currentPos, end: currentPos + txt.length });
+          currentPos += txt.length;
+        }
+
+        let startNodeIdx = -1;
+        let endNodeIdx = -1;
+        for (let i = 0; i < ranges.length; i++) {
+          if (startNodeIdx === -1 && matchStart >= ranges[i].start && matchStart < ranges[i].end) {
+            startNodeIdx = i;
+          }
+          if (matchEnd > ranges[i].start && matchEnd <= ranges[i].end) {
+            endNodeIdx = i;
+            break;
+          }
+        }
+
+        if (startNodeIdx !== -1 && endNodeIdx !== -1) {
+          const startRange = ranges[startNodeIdx];
+          const endRange = ranges[endNodeIdx];
+          const textBefore = (startRange.node.textContent || '').substring(0, matchStart - startRange.start);
+          const textAfter = (endRange.node.textContent || '').substring(matchEnd - endRange.start);
+
+          setRunText(startRange.node, textBefore + targetText);
+          for (let j = startNodeIdx + 1; j <= endNodeIdx; j++) {
+            setRunText(ranges[j].node, j === endNodeIdx ? textAfter : '');
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Scans all paragraphs for any repeated suffix such as:
+ * /2026-Cyber-BHM/2026-Cyber-BHM -> /2026-Cyber-BHM
+ */
+function deduplicateMemoYearSuffix(xmlDoc: Document): void {
+  const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
+  for (const p of paragraphs) {
+    const textNodes = Array.from(p.getElementsByTagName('w:t'));
+    const fullText = textNodes.map(t => t.textContent || '').join('');
+
+    const dupRegex = /(\/\d{4}-Cyber-[A-Za-z]+)(\s*\1)+/gi;
+    if (dupRegex.test(fullText)) {
+      for (const t of textNodes) {
+        if (t.textContent && dupRegex.test(t.textContent)) {
+          dupRegex.lastIndex = 0;
+          setRunText(t, t.textContent.replace(dupRegex, '$1'));
+        }
+      }
     }
   }
 }
@@ -321,7 +474,7 @@ export async function generate179NoticeDocx(
 
   // Suffix "/2026-Cyber-BHM" is already present in the master DOCX.
   // memoNo MUST be strictly the numeric portion (e.g. "159", "160") to prevent duplication.
-  const numericMemo = memoNo.replace(/\/?\d{4}-Cyber-BHM.*$/i, '').trim() || memoNo.trim();
+  const numericMemo = (memoNo.match(/\d+/) || [memoNo.trim()])[0];
 
   // Replacements mapping
   const replacements: Record<string, string> = {
@@ -352,6 +505,7 @@ export async function generate179NoticeDocx(
     MEMO_NO: numericMemo,
     'MEMO NO': numericMemo,
     'MEMO NO.': numericMemo,
+    MEMO_NUMBER: numericMemo,
 
     // Notice common fields
     DATE: config.date || '',
@@ -372,10 +526,16 @@ export async function generate179NoticeDocx(
   // 1. Process Through line specifically to ensure: Through O.C., [RECORD_PS] PS
   applyThroughLine(xmlDoc, psDisplay);
 
-  // 2. Precision placeholder replacement on paragraphs containing placeholders
+  // 2. Process Memo number for templates with static memo numbers
+  applyMemoNumber(xmlDoc, numericMemo);
+
+  // 3. Precision placeholder replacement on paragraphs containing placeholders
   processDocumentXml(xmlDoc, replacements);
 
-  // 3. Also process headers & footers if they contain placeholders
+  // 4. Deduplicate any memo year suffix if accidentally duplicated
+  deduplicateMemoYearSuffix(xmlDoc);
+
+  // 5. Also process headers & footers if they contain placeholders
   for (const filename of Object.keys(zip.files)) {
     if (filename.startsWith('word/header') || filename.startsWith('word/footer')) {
       const hFile = zip.file(filename);
@@ -383,6 +543,7 @@ export async function generate179NoticeDocx(
         const hText = await hFile.async('string');
         const hDoc = parser.parseFromString(hText, 'application/xml');
         processDocumentXml(hDoc, replacements);
+        deduplicateMemoYearSuffix(hDoc);
         const serializer = new XMLSerializer();
         zip.file(filename, serializer.serializeToString(hDoc));
       }

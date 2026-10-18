@@ -58,13 +58,16 @@ export const Notice179Generator: React.FC<Props> = ({
   const getMemoNoForIndex = (index: number): string => {
     const rec = selectedRecords[index];
     if (rec && manualOverrides[rec.serial]?.memoNo) {
-      return manualOverrides[rec.serial].memoNo!.replace(/\/?\d{4}-Cyber-BHM.*$/i, '').trim();
+      const m = manualOverrides[rec.serial].memoNo!.trim();
+      const num = m.match(/\d+/)?.[0];
+      return num || m.replace(/\/?\d{4}-Cyber-BHM.*$/i, '').trim() || '159';
     }
-    const startNum = parseInt(startingMemoNo.trim(), 10);
+    const cleanStarting = startingMemoNo.trim().match(/\d+/)?.[0] || '159';
+    const startNum = parseInt(cleanStarting, 10);
     if (!isNaN(startNum)) {
       return String(startNum + index);
     }
-    return startingMemoNo.trim() || '159';
+    return '159';
   };
 
   // Helper to get effective record fields
@@ -366,9 +369,8 @@ export const Notice179Generator: React.FC<Props> = ({
 
             <div className="flex justify-between font-mono text-[11px] pt-1">
               <span>
-                Memo No:{' '}
                 <strong className="text-slate-900 font-semibold font-mono">
-                  {getMemoNoForIndex(previewIdx)}/2026-Cyber-BHM
+                  No. {getMemoNoForIndex(previewIdx)}/2026-Cyber-BHM
                 </strong>
               </span>
               <span>Date: {date || '__________'}</span>
