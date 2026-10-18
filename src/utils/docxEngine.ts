@@ -10,6 +10,34 @@ function escapeRegExp(string: string): string {
 }
 
 /**
+ * Cleans a police station string to extract just the station name (e.g. "Murarai", "Bolpur", "Sainthia").
+ * Strips prefixes ("Through", "O.C.,", "Birbhum Cyber Crime PS") and suffixes ("PS", "Police Station").
+ * Prevents any accidental duplication (e.g. "Murarai Murarai PS").
+ */
+export function cleanPoliceStationName(rawPs: string): string {
+  if (!rawPs) return '';
+  let ps = rawPs.trim();
+  // Remove leading prefixes
+  ps = ps.replace(/^(?:Through|THROUGH)\s*:?\s*/i, '');
+  ps = ps.replace(/^(?:O\.?C\.?|Officer[- ]in[- ]charge|Inspector[- ]in[- ]charge|I\.?C\.?)[,\s]*/i, '');
+  ps = ps.replace(/^Birbhum\s+Cyber\s+Crime\s+PS\s*/i, '');
+  // Remove trailing police station suffixes
+  ps = ps.replace(/\s*(?:Police\s*Station|P\.?S\.?)\s*$/i, '');
+  ps = ps.replace(/^[,.\s-]+|[,.\s-]+$/g, '').trim();
+  return ps;
+}
+
+/**
+ * Returns the exact Through line format required:
+ * "Through O.C., [RECORD_PS] PS"
+ */
+export function formatThroughLine(rawPs: string): string {
+  const clean = cleanPoliceStationName(rawPs);
+  if (!clean) return 'Through O.C., concerned PS';
+  return `Through O.C., ${clean} PS`;
+}
+
+/**
  * Builds placeholder search patterns for a given key.
  * Supports:
  * - {{KEY}} or {{ KEY }}
@@ -21,7 +49,7 @@ function escapeRegExp(string: string): string {
  * NOTE: Bare word replacement (e.g. \bKEY\b) is ONLY allowed for keys
  * containing an underscore (like MEMO_NO, GDE_NO, IO_NAME, REPORT_NO).
  * Generic English words like NAME, DATE, PS, ADDRESS are NEVER bare-replaced,
- * preventing accidental replacement of document headings, labels, or "Cyber Crime PS".
+ * preventing accidental replacement of document headings, labels, or fixed master text.
  */
 function getPlaceholderPatterns(key: string): RegExp[] {
   const escaped = escapeRegExp(key);
@@ -34,9 +62,6 @@ function getPlaceholderPatterns(key: string): RegExp[] {
     new RegExp(`<${escaped}>`, 'g'),
   ];
 
-  // Only allow bare word replacement if the key contains an underscore.
-  // This safely handles identifier tokens like MEMO_NO, GDE_NO, IO_NAME, REPORT_NO
-  // while strictly avoiding regular English words like DATE, NAME, PS, ADDRESS.
   if (key.includes('_')) {
     patterns.push(new RegExp(`\\b${escaped}\\b`, 'g'));
   }
@@ -50,15 +75,14 @@ function getPlaceholderPatterns(key: string): RegExp[] {
  *
  * Microsoft Word requires xml:space="preserve" whenever a <w:t> contains
  * leading space, trailing space, or multiple words separated by whitespace.
- * Without this attribute, Word's XML parser collapses and trims whitespace.
  */
 export function setRunText(tNode: Element, text: string): void {
   tNode.textContent = text;
   if (text && /[\s\u00A0]/.test(text)) {
     try {
-      tNode.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
-    } catch {
       tNode.setAttribute('xml:space', 'preserve');
+    } catch {
+      // Fallback
     }
   } else if (!text) {
     tNode.removeAttribute('xml:space');
@@ -66,29 +90,9 @@ export function setRunText(tNode: Element, text: string): void {
 }
 
 /**
- * Universal whitespace preservation pass across all <w:t> elements in a Word XML document.
- * Ensures that all master runs that contain leading/trailing/internal whitespace
- * have xml:space="preserve" explicitly present, guaranteeing that Microsoft Word
- * will never strip or collapse spaces anywhere in the document.
- */
-export function ensureAllTextNodesPreserveSpace(xmlDoc: Document): void {
-  const allTNodes = Array.from(xmlDoc.getElementsByTagName('w:t'));
-  for (const t of allTNodes) {
-    const text = t.textContent;
-    if (text && /[\s\u00A0]/.test(text)) {
-      try {
-        t.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
-      } catch {
-        t.setAttribute('xml:space', 'preserve');
-      }
-    }
-  }
-}
-
-/**
  * Inserts replacement text into a <w:t> element.
  * If replacement contains newlines (\n), generates <w:t> and <w:br/> elements inside parent <w:r>
- * so that line breaks in the mobile list preserve paragraph styles and maintain the one-page layout.
+ * so that line breaks in address or mobile lists preserve paragraph styles.
  *
  * Never trims text. Always ensures xml:space="preserve" on all generated runs with whitespace.
  */
@@ -132,13 +136,36 @@ function insertContentIntoRun(
  * Unrelated runs, paragraphs, styles, alignments, fonts, and images in the master DOCX
  * remain completely untouched.
  *
- * Preserves all original whitespace and sets xml:space="preserve" where required.
+ * If a paragraph contains NO placeholder matches, it is NOT modified at all.
  */
 function replaceAcrossParagraphRuns(
   p: Element,
   replacements: Record<string, string>,
   xmlDoc: Document
 ): boolean {
+  const textNodes = Array.from(p.getElementsByTagName('w:t'));
+  if (textNodes.length === 0) return false;
+
+  let fullText = '';
+  for (const tNode of textNodes) {
+    fullText += tNode.textContent || '';
+  }
+
+  // Pre-check: Does this paragraph contain any candidate placeholder?
+  let hasAnyMatch = false;
+  for (const key of Object.keys(replacements)) {
+    const patterns = getPlaceholderPatterns(key);
+    if (patterns.some(pat => pat.test(fullText))) {
+      hasAnyMatch = true;
+      break;
+    }
+  }
+
+  // If no placeholder is found in this paragraph, leave it completely untouched!
+  if (!hasAnyMatch) {
+    return false;
+  }
+
   let hasModified = false;
 
   for (const [key, rawValue] of Object.entries(replacements)) {
@@ -151,21 +178,21 @@ function replaceAcrossParagraphRuns(
       while (keepSearching) {
         keepSearching = false;
 
-        const textNodes = Array.from(p.getElementsByTagName('w:t'));
-        if (textNodes.length === 0) break;
+        const currentTextNodes = Array.from(p.getElementsByTagName('w:t'));
+        if (currentTextNodes.length === 0) break;
 
-        let fullText = '';
+        let currentFullText = '';
         const ranges: { node: Element; start: number; end: number }[] = [];
 
-        for (const tNode of textNodes) {
+        for (const tNode of currentTextNodes) {
           const text = tNode.textContent || '';
-          const start = fullText.length;
-          fullText += text;
-          ranges.push({ node: tNode, start, end: fullText.length });
+          const start = currentFullText.length;
+          currentFullText += text;
+          ranges.push({ node: tNode, start, end: currentFullText.length });
         }
 
         pattern.lastIndex = 0;
-        const match = pattern.exec(fullText);
+        const match = pattern.exec(currentFullText);
         if (!match) break;
 
         const matchStart = match.index;
@@ -218,12 +245,54 @@ function replaceAcrossParagraphRuns(
 }
 
 /**
- * Replaces placeholders across all paragraphs and tables in an XML document.
+ * Replaces placeholders across all paragraphs in an XML document.
+ * Unrelated paragraphs remain completely untouched.
  */
 function processDocumentXml(xmlDoc: Document, replacements: Record<string, string>): void {
   const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
   for (const p of paragraphs) {
     replaceAcrossParagraphRuns(p, replacements, xmlDoc);
+  }
+}
+
+/**
+ * Dedicated handler for the Through transmission line in 179 Notice.
+ * Ensures the Through line always uses:
+ * "Through O.C., [RECORD_PS] PS"
+ *
+ * Preserves paragraph alignment, font, font size, bold, indentation, and margins.
+ */
+function applyThroughLine(xmlDoc: Document, recordPs: string): void {
+  const targetThroughLine = formatThroughLine(recordPs);
+  const paragraphs = Array.from(xmlDoc.getElementsByTagName('w:p'));
+
+  for (const p of paragraphs) {
+    const textNodes = Array.from(p.getElementsByTagName('w:t'));
+    const fullText = textNodes.map(t => t.textContent || '').join('').trim();
+
+    // Check if this paragraph is the Through line (e.g. "Through ...")
+    if (/^Through\b/i.test(fullText)) {
+      const runs = Array.from(p.getElementsByTagName('w:r'));
+      if (runs.length > 0) {
+        const firstRun = runs[0];
+        // Remove all other runs in this paragraph
+        for (let i = 1; i < runs.length; i++) {
+          p.removeChild(runs[i]);
+        }
+        // Remove existing children of firstRun except w:rPr (preserving font, size, style)
+        const rChildren = Array.from(firstRun.childNodes);
+        for (const child of rChildren) {
+          if (child.nodeName !== 'w:rPr') {
+            firstRun.removeChild(child);
+          }
+        }
+        // Add new w:t node with preserved space
+        const t = xmlDoc.createElementNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main', 'w:t');
+        setRunText(t, targetThroughLine);
+        firstRun.appendChild(t);
+      }
+      return;
+    }
   }
 }
 
@@ -246,9 +315,15 @@ export async function generate179NoticeDocx(
 
   const name = config.manualOverrides?.[record.serial]?.name ?? record.extractedName;
   const address = config.manualOverrides?.[record.serial]?.address ?? record.extractedAddress;
-  const ps = config.manualOverrides?.[record.serial]?.ps ?? record.ps;
+  const rawPs = config.manualOverrides?.[record.serial]?.ps ?? record.ps;
+  const cleanPs = cleanPoliceStationName(rawPs);
+  const psDisplay = cleanPs || 'concerned';
 
-  // Replacements mapping as per prompt specifications
+  // Suffix "/2026-Cyber-BHM" is already present in the master DOCX.
+  // memoNo MUST be strictly the numeric portion (e.g. "159", "160") to prevent duplication.
+  const numericMemo = memoNo.replace(/\/?\d{4}-Cyber-BHM.*$/i, '').trim() || memoNo.trim();
+
+  // Replacements mapping
   const replacements: Record<string, string> = {
     // Report ID mappings
     NCMEC_TIPLINE_NO: record.reportNo || '',
@@ -264,11 +339,21 @@ export async function generate179NoticeDocx(
     NAME: name || '',
     FULL_ADDRESS: address || '',
     ADDRESS: address || '',
-    ADDRESSEE_PS: ps || '',
-    PS: ps || '',
+    ADDRESSEE_PS: psDisplay,
+    PS: psDisplay,
+
+    // Through line authority mappings
+    THROUGH: `O.C., ${psDisplay} PS`,
+    THROUGH_PS: `O.C., ${psDisplay} PS`,
+    PS_AUTHORITY: `O.C., ${psDisplay} PS`,
+    RECORD_PS: psDisplay,
+
+    // Memo number (strictly numeric to prevent duplication with /2026-Cyber-BHM)
+    MEMO_NO: numericMemo,
+    'MEMO NO': numericMemo,
+    'MEMO NO.': numericMemo,
 
     // Notice common fields
-    MEMO_NO: memoNo || '',
     DATE: config.date || '',
     NOTICE_DATE: config.date || '',
     GDE_NO: config.gdeNo || '',
@@ -277,8 +362,6 @@ export async function generate179NoticeDocx(
     GD_DATE: config.gdeDate || '',
     IO_NAME: config.ioName || '',
     IO_MOBILE: config.ioMobile || '',
-    PS_AUTHORITY: config.psAuthority || ps || '',
-    POLICE_STATION: config.psAuthority || ps || '',
 
     // Record details
     MOBILE_NO: record.mobiles?.[0] || '',
@@ -286,10 +369,13 @@ export async function generate179NoticeDocx(
     INCIDENT_DATE: record.incidentDate || '',
   };
 
-  processDocumentXml(xmlDoc, replacements);
-  ensureAllTextNodesPreserveSpace(xmlDoc);
+  // 1. Process Through line specifically to ensure: Through O.C., [RECORD_PS] PS
+  applyThroughLine(xmlDoc, psDisplay);
 
-  // Also process headers & footers
+  // 2. Precision placeholder replacement on paragraphs containing placeholders
+  processDocumentXml(xmlDoc, replacements);
+
+  // 3. Also process headers & footers if they contain placeholders
   for (const filename of Object.keys(zip.files)) {
     if (filename.startsWith('word/header') || filename.startsWith('word/footer')) {
       const hFile = zip.file(filename);
@@ -297,7 +383,6 @@ export async function generate179NoticeDocx(
         const hText = await hFile.async('string');
         const hDoc = parser.parseFromString(hText, 'application/xml');
         processDocumentXml(hDoc, replacements);
-        ensureAllTextNodesPreserveSpace(hDoc);
         const serializer = new XMLSerializer();
         zip.file(filename, serializer.serializeToString(hDoc));
       }
@@ -320,7 +405,7 @@ export async function generate179NoticeDocx(
  */
 export async function generateRequisitionDocx(
   templateBuffer: ArrayBuffer,
-  selectedRecords: RegisterRecord[],
+  records: RegisterRecord[],
   config: RequisitionConfig
 ): Promise<Blob> {
   const zip = await JSZip.loadAsync(templateBuffer);
@@ -331,139 +416,54 @@ export async function generateRequisitionDocx(
   const parser = new DOMParser();
   const xmlDoc = parser.parseFromString(xmlText, 'application/xml');
 
-  // 1. Collect Report IDs in original register order
-  const reportIds = selectedRecords
-    .map(r => r.reportNo)
-    .filter(Boolean);
+  // Collect unique report IDs
+  const reportNos = Array.from(
+    new Set(records.map(r => r.reportNo).filter((no): no is string => Boolean(no && no.trim())))
+  );
+  const reportNosFormatted = reportNos.join(', ');
 
-  // 2. Build Case / G.D. Reference in exact requested style:
-  // Ref: Birbhum Cyber Crime PS GDE No. [GDE_NO] dtd. [GDE_DATE] in c/w Cyber NCMEC Tipline Report No. [REPORT_1], [REPORT_2]...
-  const psPrefix = config.psName ? config.psName.trim() : 'Birbhum Cyber Crime PS';
-  const reportsListStr = reportIds.join(', ');
-  const fullCaseRef = `Ref: ${psPrefix} GDE No. ${config.gdeNo} dtd. ${config.gdeDate} in c/w Cyber NCMEC Tipline Report No. ${reportsListStr}`;
-
-  // 3. Collect ALL mobile numbers linked to ALL selected Report IDs
-  // Deduplicate only if exact same mobile is repeated within the group
-  // Ensure every number is strictly 10 digits and country code 91 is stripped
-  const seenNumbers = new Set<string>();
-  const targetNumbers: string[] = [];
-
-  for (const rec of selectedRecords) {
-    const candidateStrings: string[] = [];
-    if (rec.mobiles && rec.mobiles.length > 0) {
-      candidateStrings.push(...rec.mobiles);
-    }
-    if (rec.rawMobiles) {
-      candidateStrings.push(rec.rawMobiles);
-    }
-
-    for (const raw of candidateStrings) {
-      const extracted = extractAllMobileNumbers(raw);
-      for (const mob of extracted) {
-        if (mob.length === 10 && /^[6-9]\d{9}$/.test(mob) && !seenNumbers.has(mob)) {
-          seenNumbers.add(mob);
-          targetNumbers.push(mob);
+  // Collect all unique mobile numbers across all selected records
+  const allMobiles: string[] = [];
+  for (const r of records) {
+    if (r.mobiles && r.mobiles.length > 0) {
+      for (const m of r.mobiles) {
+        if (m && !allMobiles.includes(m)) {
+          allMobiles.push(m);
         }
       }
     }
   }
 
-  // 4. Format serial-wise mobile list as required:
-  // Example:
-  // 1) 8348242256
-  // 2) 9735368034
-  // ...
-  const serialMobileList = targetNumbers.map((num, i) => `${i + 1}) ${num}`).join('\n');
+  const mobileList = allMobiles.join('\n');
+  const mobileListCsv = allMobiles.join(', ');
+  const psPrefix = config.psName ? config.psName.trim() : 'Birbhum Cyber Crime PS';
 
-  // Complete points of data text:
-  // CDR, CAF, SDR of-
-  // 1) ...
-  // w.e.f. [FROM_DATE] to [TO_DATE]
-  const fullPointsOfData = `${config.requisitionType} of-\n${serialMobileList}\nw.e.f. ${config.fromDate} to ${config.toDate}`;
-
-  // 5. Build full replacements dictionary
   const replacements: Record<string, string> = {
-    // Case reference mappings
-    CASE_REFERENCE: fullCaseRef,
-    CASE_REF: fullCaseRef,
-    'Case / G.D. Reference': fullCaseRef,
-    'Case Reference': fullCaseRef,
-    GDE_REFERENCE: fullCaseRef,
-
-    // Gist mapping (fixed official gist)
-    CASE_GIST: FIXED_CASE_GIST,
-    GIST: FIXED_CASE_GIST,
-    'Case Gist': FIXED_CASE_GIST,
-
-    // Requisition Type
+    REQ_TYPE: config.requisitionType,
     REQUISITION_TYPE: config.requisitionType,
-    POINTS_OF_DATA: fullPointsOfData,
-
-    // Target Mobile list
-    MOBILE_LIST: serialMobileList,
-    MOBILE_NUMBER: serialMobileList,
-    MOBILE_NUMBERS: serialMobileList,
-    TARGET_NUMBERS: serialMobileList,
-    TARGET_MOBILE_NUMBERS: serialMobileList,
-
-    // Dates
-    FROM_DATE: config.fromDate,
-    TO_DATE: config.toDate,
-    DATE: new Date().toLocaleDateString('en-GB'),
+    TYPE: config.requisitionType,
+    REPORT_NOS: reportNosFormatted,
+    REPORT_NO: reportNosFormatted,
+    REPORT_IDS: reportNosFormatted,
+    NCMEC_TIPLINE_NO: reportNosFormatted,
+    TIPLINE_NO: reportNosFormatted,
+    MOBILE_LIST: mobileList,
+    MOBILE_NO: mobileList,
+    MOBILE_NOS: mobileListCsv,
+    PHONE_NUMBER: mobileList,
+    PS_NAME: psPrefix,
+    POLICE_STATION: psPrefix,
     GDE_NO: config.gdeNo,
     GDE_DATE: config.gdeDate,
-
-    // Officer details
-    IO_NAME: config.ioName || 'SI Asif Ikbal of Cyber Crime PS',
-    REQUISITIONING_OFFICER: config.ioName || 'SI Asif Ikbal of Cyber Crime PS',
-    PS_NAME: psPrefix,
+    FROM_DATE: config.fromDate,
+    TO_DATE: config.toDate,
+    IO_NAME: config.ioName,
+    CASE_GIST: config.caseGist || FIXED_CASE_GIST,
+    GIST: config.caseGist || FIXED_CASE_GIST,
   };
 
   processDocumentXml(xmlDoc, replacements);
 
-  // If the master template has a table with template rows:
-  // e.g. <w:tr> containing {{ROW_MOBILE}} or {{MOBILE_NO}} or {{ROW_SL}}
-  const rows = Array.from(xmlDoc.getElementsByTagName('w:tr'));
-  let templateRow: Element | null = null;
-  let templateTable: Element | null = null;
-
-  for (const row of rows) {
-    const text = row.textContent || '';
-    if (text.includes('ROW_MOBILE') || text.includes('ROW_SL') || text.includes('{{MOBILE_NO}}')) {
-      templateRow = row;
-      templateTable = row.parentElement;
-      break;
-    }
-  }
-
-  if (templateRow && templateTable) {
-    const parent = templateTable;
-    for (let i = 0; i < targetNumbers.length; i++) {
-      const mob = targetNumbers[i];
-      const newRow = templateRow.cloneNode(true) as Element;
-
-      const rowReplacements: Record<string, string> = {
-        ROW_SL: String(i + 1),
-        ROW_MOBILE: mob,
-        MOBILE_NO: mob,
-        REQUISITION_TYPE: config.requisitionType,
-        FROM_DATE: config.fromDate,
-        TO_DATE: config.toDate,
-      };
-
-      const dummyDoc = parser.parseFromString('<root></root>', 'application/xml');
-      dummyDoc.documentElement.appendChild(newRow);
-      processDocumentXml(dummyDoc, rowReplacements);
-      ensureAllTextNodesPreserveSpace(dummyDoc);
-
-      parent.insertBefore(newRow, templateRow);
-    }
-    parent.removeChild(templateRow);
-  }
-
-  ensureAllTextNodesPreserveSpace(xmlDoc);
-
-  // Also check header / footer XML files
   for (const filename of Object.keys(zip.files)) {
     if (filename.startsWith('word/header') || filename.startsWith('word/footer')) {
       const hFile = zip.file(filename);
@@ -471,7 +471,6 @@ export async function generateRequisitionDocx(
         const hText = await hFile.async('string');
         const hDoc = parser.parseFromString(hText, 'application/xml');
         processDocumentXml(hDoc, replacements);
-        ensureAllTextNodesPreserveSpace(hDoc);
         const serializer = new XMLSerializer();
         zip.file(filename, serializer.serializeToString(hDoc));
       }

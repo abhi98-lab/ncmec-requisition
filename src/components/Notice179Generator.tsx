@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { RegisterRecord, Notice179Config, GeneratedDoc } from '../types';
 import { StoredMasterTemplate } from '../utils/templateStorage';
-import { generate179NoticeDocx } from '../utils/docxEngine';
+import { generate179NoticeDocx, cleanPoliceStationName, formatThroughLine } from '../utils/docxEngine';
 import { triggerDownload, openDocumentInDeviceApp, createZipFromDocuments } from '../utils/fileUtils';
 
 interface Props {
@@ -30,15 +30,13 @@ export const Notice179Generator: React.FC<Props> = ({
   // Current year for default memo suffix
   const currentYear = new Date().getFullYear();
 
-  // Form common fields
-  const [startingMemoNo, setStartingMemoNo] = useState<string>('150');
-  const [memoYearSuffix, setMemoYearSuffix] = useState<string>(`/${currentYear}-Cyber-BHM`);
+  // Form common fields - startingMemoNo is strictly numeric (e.g. 159)
+  const [startingMemoNo, setStartingMemoNo] = useState<string>('159');
   const [date, setDate] = useState<string>(new Date().toLocaleDateString('en-GB'));
   const [gdeNo, setGdeNo] = useState<string>('');
   const [gdeDate, setGdeDate] = useState<string>(new Date().toLocaleDateString('en-GB'));
-  const [ioName, setIoName] = useState<string>('SI Asif Ikbal of Cyber Crime PS');
+  const [ioName, setIoName] = useState<string>('SI Asif Ikbal');
   const [ioMobile, setIoMobile] = useState<string>('');
-  const [psAuthority, setPsAuthority] = useState<string>('Birbhum Cyber Crime PS');
 
   // Manual overrides per record serial for name, address, PS, memoNo
   const [manualOverrides, setManualOverrides] = useState<
@@ -56,17 +54,17 @@ export const Notice179Generator: React.FC<Props> = ({
 
   const currentPreviewRecord = selectedRecords[previewIdx] || selectedRecords[0];
 
-  // Helper to compute sequential Memo No for a given record index
+  // Helper to compute strictly numeric Memo No for a given record index (e.g. 159, 160)
   const getMemoNoForIndex = (index: number): string => {
     const rec = selectedRecords[index];
     if (rec && manualOverrides[rec.serial]?.memoNo) {
-      return manualOverrides[rec.serial].memoNo!;
+      return manualOverrides[rec.serial].memoNo!.replace(/\/?\d{4}-Cyber-BHM.*$/i, '').trim();
     }
     const startNum = parseInt(startingMemoNo.trim(), 10);
     if (!isNaN(startNum)) {
-      return `${startNum + index}${memoYearSuffix.trim()}`;
+      return String(startNum + index);
     }
-    return `${startingMemoNo.trim()}${memoYearSuffix.trim()}`;
+    return startingMemoNo.trim() || '159';
   };
 
   // Helper to get effective record fields
@@ -101,14 +99,14 @@ export const Notice179Generator: React.FC<Props> = ({
 
     try {
       const config: Notice179Config = {
-        startingMemoNo,
-        memoYearSuffix,
+        startingMemoNo: startingMemoNo.trim(),
+        memoYearSuffix: `/${currentYear}-Cyber-BHM`,
         date,
         gdeNo,
         gdeDate,
         ioName,
         ioMobile,
-        psAuthority,
+        psAuthority: '', // Not used for Through line; suspect's PS is authoritative
         manualOverrides,
       };
 
@@ -116,6 +114,7 @@ export const Notice179Generator: React.FC<Props> = ({
 
       for (let i = 0; i < selectedRecords.length; i++) {
         const record = selectedRecords[i];
+        // Pass strictly the numeric memo number (e.g. 159, 160)
         const memoNo = getMemoNoForIndex(i);
 
         // Modify actual master DOCX from IndexedDB buffer
@@ -226,29 +225,18 @@ export const Notice179Generator: React.FC<Props> = ({
           {/* Starting Memo No */}
           <div>
             <label className="block text-slate-700 font-medium mb-1">
-              Starting Memo No.
+              Starting Memo No. (Numeric Only)
             </label>
             <input
               type="text"
-              placeholder="e.g. 150"
+              placeholder="e.g. 159"
               value={startingMemoNo}
-              onChange={e => setStartingMemoNo(e.target.value)}
-              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-800"
+              onChange={e => setStartingMemoNo(e.target.value.replace(/\/?\d{4}-Cyber-BHM.*$/i, '').trim())}
+              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-800 font-mono"
             />
-          </div>
-
-          {/* Memo Suffix */}
-          <div>
-            <label className="block text-slate-700 font-medium mb-1">
-              Memo Suffix / Format
-            </label>
-            <input
-              type="text"
-              placeholder={`/${currentYear}-Cyber-BHM`}
-              value={memoYearSuffix}
-              onChange={e => setMemoYearSuffix(e.target.value)}
-              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-800"
-            />
+            <p className="text-[10px] text-slate-500 mt-1">
+              Suffix <code>/2026-Cyber-BHM</code> is preserved from master. Generates 159, 160, 161...
+            </p>
           </div>
 
           {/* Notice Date */}
@@ -293,10 +281,10 @@ export const Notice179Generator: React.FC<Props> = ({
 
           {/* IO Name */}
           <div>
-            <label className="block text-slate-700 font-medium mb-1">IO Name</label>
+            <label className="block text-slate-700 font-medium mb-1">IO Name (Optional Override)</label>
             <input
               type="text"
-              placeholder="SI Asif Ikbal of Cyber Crime PS"
+              placeholder="e.g. SI Asif Ikbal"
               value={ioName}
               onChange={e => setIoName(e.target.value)}
               className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-800"
@@ -305,7 +293,7 @@ export const Notice179Generator: React.FC<Props> = ({
 
           {/* IO Mobile */}
           <div>
-            <label className="block text-slate-700 font-medium mb-1">IO Mobile No.</label>
+            <label className="block text-slate-700 font-medium mb-1">IO Mobile No. (Optional)</label>
             <input
               type="text"
               placeholder="IO Contact Number"
@@ -315,18 +303,21 @@ export const Notice179Generator: React.FC<Props> = ({
             />
           </div>
 
-          {/* PS Authority */}
-          <div className="sm:col-span-2">
-            <label className="block text-slate-700 font-medium mb-1">
-              PS Authority
-            </label>
-            <input
-              type="text"
-              placeholder="Birbhum Cyber Crime PS"
-              value={psAuthority}
-              onChange={e => setPsAuthority(e.target.value)}
-              className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-800"
-            />
+          {/* Suspect's PS Routing info */}
+          <div className="sm:col-span-2 lg:col-span-3 bg-slate-100/80 border border-slate-200 rounded p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <span className="block text-[11px] font-semibold text-slate-800">
+                Through Transmission Routing
+              </span>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                Automatically uses the suspect's local Police Station parsed from each record.
+              </p>
+            </div>
+            {currentPreviewRecord && (
+              <span className="text-xs font-mono font-semibold text-slate-900 bg-white px-2.5 py-1 rounded border border-slate-200 shrink-0">
+                {formatThroughLine(getEffectiveRecord(currentPreviewRecord).ps)}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -377,22 +368,22 @@ export const Notice179Generator: React.FC<Props> = ({
               <span>
                 Memo No:{' '}
                 <strong className="text-slate-900 font-semibold font-mono">
-                  {getMemoNoForIndex(previewIdx)}
+                  {getMemoNoForIndex(previewIdx)}/2026-Cyber-BHM
                 </strong>
               </span>
               <span>Date: {date || '__________'}</span>
             </div>
 
             <div className="pt-1 space-y-1">
-              <div className="font-bold">To,</div>
-              <div className="pl-4 font-sans font-semibold text-slate-900">
+              <div className="font-bold text-slate-900">To,</div>
+              <div className="pl-4 font-sans font-semibold text-slate-900 whitespace-pre-line">
                 {getEffectiveRecord(currentPreviewRecord).name || (
                   <span className="text-amber-700 italic bg-amber-50 px-1 rounded">
                     [Addressee Name missing - Click below to enter]
                   </span>
                 )}
               </div>
-              <div className="pl-4 font-sans text-slate-600">
+              <div className="pl-4 font-sans text-slate-700 whitespace-pre-line">
                 {getEffectiveRecord(currentPreviewRecord).address || (
                   <span className="text-amber-700 italic bg-amber-50 px-1 rounded">
                     [Full Address missing - Click below to enter]
@@ -400,7 +391,13 @@ export const Notice179Generator: React.FC<Props> = ({
                 )}
               </div>
               <div className="pl-4 font-sans text-slate-700">
-                PS: <span className="font-semibold">{getEffectiveRecord(currentPreviewRecord).ps || '—'}</span>
+                PS: <span className="font-semibold">{cleanPoliceStationName(getEffectiveRecord(currentPreviewRecord).ps) || getEffectiveRecord(currentPreviewRecord).ps || '—'}</span>
+              </div>
+              {/* Prominent Through line preview */}
+              <div className="pl-4 pt-1">
+                <span className="font-sans font-semibold text-slate-900 bg-slate-200/80 px-2.5 py-1 rounded inline-block text-xs border border-slate-300">
+                  Through: <strong className="text-slate-900">{cleanPoliceStationName(getEffectiveRecord(currentPreviewRecord).ps) ? `O.C., ${cleanPoliceStationName(getEffectiveRecord(currentPreviewRecord).ps)} PS` : 'O.C., concerned PS'}</strong>
+                </span>
               </div>
             </div>
 
@@ -414,16 +411,15 @@ export const Notice179Generator: React.FC<Props> = ({
               <p className="mt-1">
                 <span className="font-semibold">Ref:</span> GDE No.{' '}
                 <span className="font-mono font-semibold">{gdeNo || '[GDE No]'}</span> dated{' '}
-                <span className="font-mono">{gdeDate || '[GDE Date]'}</span> of{' '}
-                {getEffectiveRecord(currentPreviewRecord).ps || psAuthority || 'concerned'} PS.
+                <span className="font-mono">{gdeDate || '[GDE Date]'}</span> of Birbhum Cyber Crime PS.
               </p>
             </div>
 
             <div className="pt-2 flex justify-end font-sans text-[11px] text-slate-600 border-t border-slate-200">
               <div className="text-right space-y-0.5">
-                <div>Investigating Officer: <span className="font-semibold text-slate-900">{ioName || '—'}</span></div>
+                <div>Investigating Officer: <span className="font-semibold text-slate-900">{ioName || 'SI Asif Ikbal'}</span></div>
                 {ioMobile && <div>Mobile: <span className="font-mono">{ioMobile}</span></div>}
-                <div>PS Authority: <span className="font-semibold">{psAuthority || '—'}</span></div>
+                <div>Police Station: <span className="font-semibold">Birbhum Cyber Crime PS</span></div>
               </div>
             </div>
 
@@ -449,7 +445,7 @@ export const Notice179Generator: React.FC<Props> = ({
                 />
                 <input
                   type="text"
-                  placeholder="Police Station"
+                  placeholder="Police Station (e.g. Murarai)"
                   value={manualOverrides[currentPreviewRecord.serial]?.ps ?? currentPreviewRecord.ps}
                   onChange={e => updateCurrentRecordOverride('ps', e.target.value)}
                   className="px-2 py-1 border border-slate-300 rounded text-slate-900 text-[11px]"
@@ -460,131 +456,99 @@ export const Notice179Generator: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Action / Master Template Missing Check */}
-      <div className="pt-1">
-        {!notice179 ? (
-          <div className="p-3.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>Please add the master template first.</span>
-            </div>
+      {/* Action Buttons */}
+      <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-200">
+        <div className="text-xs text-slate-500">
+          Ready to generate {selectedRecords.length} document{selectedRecords.length === 1 ? '' : 's'}.
+        </div>
+
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          {!notice179 && (
             <button
               type="button"
               onClick={onOpenTemplates}
-              className="px-3 py-1.5 bg-amber-800 text-white rounded text-xs font-medium hover:bg-amber-900 transition flex items-center gap-1.5 self-start sm:self-auto"
+              className="w-full sm:w-auto px-4 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded border border-slate-300 inline-flex items-center justify-center gap-1.5 transition-colors"
             >
               <Upload className="w-3.5 h-3.5" />
-              <span>Upload Master DOCX</span>
+              <span>Add 179 Master Template</span>
             </button>
-          </div>
-        ) : (
-          <div>
-            {downloadStatus === 'idle' && (
+          )}
+
+          <button
+            type="button"
+            disabled={!notice179 || selectedRecords.length === 0 || isGenerating}
+            onClick={handleGenerate}
+            className="w-full sm:w-auto px-5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded shadow-xs inline-flex items-center justify-center gap-2 transition-colors"
+          >
+            {isGenerating ? (
+              <>
+                <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <span>Generating {selectedRecords.length} Notice(s)...</span>
+              </>
+            ) : (
+              <>
+                <FileText className="w-3.5 h-3.5" />
+                <span>Generate {selectedRecords.length} Notice(s)</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Generated Documents List */}
+      {generatedDocs.length > 0 && (
+        <div className="mt-4 pt-4 border-t border-slate-200 space-y-2.5">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <span className="text-xs font-semibold text-slate-800">
+              Generated 179 Notices ({generatedDocs.length})
+            </span>
+            {generatedDocs.length > 1 && (
               <button
                 type="button"
-                onClick={handleGenerate}
-                disabled={isGenerating || !!validationError}
-                className="w-full sm:w-auto px-6 py-2.5 bg-slate-900 text-white rounded-md text-xs font-semibold hover:bg-slate-800 transition shadow-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                onClick={handleDownloadAllZip}
+                className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded transition-colors"
               >
-                <FileText className="w-4 h-4" />
-                <span>Generate DOCX ({selectedRecords.length} Notice{selectedRecords.length > 1 ? 's' : ''})</span>
+                <FolderArchive className="w-3.5 h-3.5 text-slate-600" />
+                <span>Download All as ZIP</span>
               </button>
             )}
+          </div>
 
-            {downloadStatus === 'downloading' && (
-              <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 flex items-center gap-3">
-                <div className="w-5 h-5 border-2 border-slate-900 border-t-transparent rounded-full animate-spin shrink-0" />
-                <span className="text-xs font-semibold text-slate-800">Downloading...</span>
-              </div>
-            )}
-
-            {downloadStatus === 'downloaded' && (
-              <div className="p-4 rounded-lg bg-emerald-50/70 border border-emerald-200 space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-900">Downloaded ✓</h4>
-                      <p className="text-[11px] text-slate-600">
-                        Generated {generatedDocs.length} individual notice DOCX file{generatedDocs.length > 1 ? 's' : ''}.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {generatedDocs.length === 1 ? (
-                      <button
-                        onClick={() => handleOpenDoc(generatedDocs[0])}
-                        className="px-4 py-2 bg-slate-900 text-white rounded text-xs font-semibold hover:bg-slate-800 transition flex items-center gap-1.5 shadow-xs"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5" />
-                        <span>Open</span>
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          onClick={handleDownloadAllZip}
-                          className="px-3.5 py-1.5 bg-slate-900 text-white rounded text-xs font-semibold hover:bg-slate-800 transition flex items-center gap-1.5 shadow-xs"
-                        >
-                          <FolderArchive className="w-3.5 h-3.5" />
-                          <span>Download All (ZIP)</span>
-                        </button>
-                        <button
-                          onClick={() => handleOpenDoc(generatedDocs[0])}
-                          className="px-3 py-1.5 bg-white border border-slate-300 text-slate-800 rounded text-xs font-medium hover:bg-slate-50 transition flex items-center gap-1.5"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>Open First</span>
-                        </button>
-                      </>
-                    )}
-                  </div>
+          <div className="divide-y divide-slate-100 border border-slate-200 rounded bg-slate-50/50 max-h-60 overflow-y-auto">
+            {generatedDocs.map((doc, idx) => (
+              <div
+                key={doc.id}
+                className="p-2.5 flex items-center justify-between text-xs hover:bg-white transition-colors"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <FileText className="w-4 h-4 text-slate-500 shrink-0" />
+                  <span className="truncate font-mono text-slate-800">{doc.filename}</span>
                 </div>
-
-                {/* List of files for immediate access */}
-                <div className="max-h-48 overflow-y-auto divide-y divide-slate-200/80 border border-slate-200 rounded bg-white text-xs">
-                  {generatedDocs.map(doc => (
-                    <div key={doc.id} className="p-2.5 flex items-center justify-between hover:bg-slate-50/70">
-                      <div className="flex items-center gap-2 truncate mr-2">
-                        <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                        <span className="font-mono text-[11px] text-slate-800 truncate">
-                          {doc.filename}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          onClick={() => triggerDownload(doc.blob, doc.filename)}
-                          className="px-2 py-1 text-[11px] text-slate-700 hover:text-slate-900 border border-slate-200 rounded hover:bg-slate-100 flex items-center gap-1"
-                        >
-                          <Download className="w-3 h-3" />
-                          <span>Download</span>
-                        </button>
-                        <button
-                          onClick={() => handleOpenDoc(doc)}
-                          className="px-2 py-1 text-[11px] bg-slate-900 text-white rounded hover:bg-slate-800 flex items-center gap-1 font-medium"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                          <span>Open</span>
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="pt-1 flex justify-end">
+                <div className="flex items-center gap-1.5 shrink-0 ml-2">
                   <button
                     type="button"
-                    onClick={() => setDownloadStatus('idle')}
-                    className="text-[11px] text-slate-500 hover:text-slate-800 underline"
+                    onClick={() => handleOpenDoc(doc)}
+                    className="px-2 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 text-[11px] font-medium text-slate-700 inline-flex items-center gap-1"
+                    title="Open document directly in device app"
                   >
-                    Generate Again / Modify Fields
+                    <ExternalLink className="w-3 h-3 text-slate-500" />
+                    <span>Open</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => triggerDownload(doc.blob, doc.filename)}
+                    className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-medium inline-flex items-center gap-1"
+                    title="Download DOCX"
+                  >
+                    <Download className="w-3 h-3" />
+                    <span>Download</span>
                   </button>
                 </div>
               </div>
-            )}
+            ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

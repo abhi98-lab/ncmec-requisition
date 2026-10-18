@@ -2,16 +2,16 @@ import JSZip from 'jszip';
 import { RegisterRecord } from '../types';
 import { extractAllMobileNumbers } from './phoneUtils';
 import { parseSdrDetails } from './sdrUtils';
+import { cleanPoliceStationName } from './docxEngine';
 
 /**
- * Extracts cell text while preserving paragraph boundaries (<w:p>)
- * and line-break elements (<w:br/>, <w:cr/>) so separate mobile number
- * entries on separate lines/paragraphs are NOT concatenated into one long string.
+ * Extracts cell text while preserving paragraph boundaries (<w:p>),
+ * tab elements (<w:tab/>), and line-break elements (<w:br/>, <w:cr/>)
+ * so words and lines are never collapsed or concatenated together.
  */
 function extractCellText(tcNode: Element): string {
   const paragraphs = Array.from(tcNode.getElementsByTagName('w:p'));
   if (paragraphs.length === 0) {
-    // If no paragraphs, fallback to textContent
     return tcNode.textContent?.trim() || '';
   }
 
@@ -27,22 +27,24 @@ function extractCellText(tcNode: Element): string {
         for (const rChild of rChildren) {
           if (rChild.nodeName === 'w:t') {
             pText += rChild.textContent || '';
+          } else if (rChild.nodeName === 'w:tab') {
+            pText += ' ';
           } else if (rChild.nodeName === 'w:br' || rChild.nodeName === 'w:cr') {
             pText += '\n';
           }
         }
+      } else if (child.nodeName === 'w:tab') {
+        pText += ' ';
       } else if (child.nodeName === 'w:br' || child.nodeName === 'w:cr') {
         pText += '\n';
       }
     }
 
-    // If paragraph has text, append
     if (pText.trim().length > 0) {
       paragraphTexts.push(pText.trim());
     }
   }
 
-  // Join paragraphs with newline so each visual line is distinct
   return paragraphTexts.join('\n');
 }
 
@@ -116,7 +118,12 @@ export async function parseDocxRegister(file: File | ArrayBuffer): Promise<Regis
         } else if (text.includes('sdr') || text.includes('address') || text.includes('name')) {
           colSdr = c;
           hasHeaderKeywords = true;
-        } else if (text === 'ps' || text.includes('police station') || text.includes('station')) {
+        } else if (
+          text === 'ps' ||
+          text === 'p.s' ||
+          text === 'p.s.' ||
+          /\b(?:ps|p\.s\.?|police\s*station)\b/i.test(text)
+        ) {
           colPs = c;
           hasHeaderKeywords = true;
         } else if (text.includes('incident') || (text.includes('date') && !text.includes('gde'))) {
@@ -146,13 +153,15 @@ export async function parseDocxRegister(file: File | ArrayBuffer): Promise<Regis
       const row = tableData[r];
       // Skip empty row or repeated headers
       if (!row || row.every(c => !c.trim())) continue;
-      const isRepeatHeader = row.some(c => c.toLowerCase().includes('tipline report') || c.toLowerCase().includes('incident date'));
+      const isRepeatHeader = row.some(
+        c => c.toLowerCase().includes('tipline report') || c.toLowerCase().includes('incident date')
+      );
       if (isRepeatHeader) continue;
 
       const reportNo = (row[colReport] || '').trim();
       const rawMobile = (row[colMobile] || '').trim();
       const sdr = (row[colSdr] || '').trim();
-      const ps = (row[colPs] || '').trim();
+      let rawPs = (row[colPs] || '').trim();
       const incidentDate = (row[colDate] || '').trim();
 
       // If all critical fields are empty, skip
@@ -162,6 +171,16 @@ export async function parseDocxRegister(file: File | ArrayBuffer): Promise<Regis
       const mobiles = extractAllMobileNumbers(rawMobile);
       const { name, address } = parseSdrDetails(sdr);
 
+      // If PS column was empty, attempt extraction from SDR text
+      if (!rawPs && sdr) {
+        const sdrPsMatch = sdr.match(/(?:P\.?S\.?|Police\s*Station)\s*[:=-]?\s*([A-Za-z\s]+?)(?:[,\n\r\d]|$)/i);
+        if (sdrPsMatch && sdrPsMatch[1]) {
+          rawPs = sdrPsMatch[1].trim();
+        }
+      }
+
+      const cleanPs = cleanPoliceStationName(rawPs) || rawPs;
+
       records.push({
         serial: visibleSerial++,
         reportNo,
@@ -170,7 +189,7 @@ export async function parseDocxRegister(file: File | ArrayBuffer): Promise<Regis
         sdr,
         extractedName: name,
         extractedAddress: address,
-        ps,
+        ps: cleanPs,
         incidentDate,
       });
     }
